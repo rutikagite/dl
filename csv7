@@ -1,0 +1,250 @@
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import VGG16
+from tensorflow.keras import layers, models, optimizers
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+
+# ============================================================================
+# 1. LOAD CSV DATASET
+# ============================================================================
+# Assuming you have a CSV file with columns: 'filename', 'label'
+# Example CSV format:
+# filename,label
+# images/cat.1.jpg,cat
+# images/dog.1.jpg,dog
+
+# Load your CSV file
+csv_file = 'path/to/your/dataset.csv'  # UPDATE THIS PATH
+df = pd.read_csv(csv_file)
+
+# Verify the CSV structure
+print("CSV Preview:")
+print(df.head())
+print(f"\nTotal images: {len(df)}")
+print(f"Label distribution:\n{df['label'].value_counts()}")
+
+# ============================================================================
+# 2. SPLIT DATA INTO TRAIN AND VALIDATION
+# ============================================================================
+from sklearn.model_selection import train_test_split
+
+# Split 80% train, 20% validation
+train_df, val_df = train_test_split(df, test_size=0.2, random_state=42, stratify=df['label'])
+
+print(f"\nTraining samples: {len(train_df)}")
+print(f"Validation samples: {len(val_df)}")
+
+# ============================================================================
+# 3. SETUP IMAGE DATA GENERATORS
+# ============================================================================
+IMG_SIZE = 224
+BATCH_SIZE = 32
+
+# Directory where images are stored (parent directory of image paths in CSV)
+image_directory = 'path/to/image/directory'  # UPDATE THIS PATH
+
+# Training data generator with augmentation
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+# Validation data generator (only rescaling, no augmentation)
+val_datagen = ImageDataGenerator(rescale=1./255)
+
+# Create generators from dataframes
+train_generator = train_datagen.flow_from_dataframe(
+    dataframe=train_df,
+    directory=image_directory,
+    x_col='filename',  # Column with image filenames
+    y_col='label',     # Column with labels
+    target_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
+    class_mode='binary',  # Use 'categorical' for multi-class
+    shuffle=True
+)
+
+val_generator = val_datagen.flow_from_dataframe(
+    dataframe=val_df,
+    directory=image_directory,
+    x_col='filename',
+    y_col='label',
+    target_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
+    class_mode='binary',  # Use 'categorical' for multi-class
+    shuffle=False
+)
+
+print(f"\nClass indices: {train_generator.class_indices}")
+
+# ============================================================================
+# 4. LOAD PRE-TRAINED VGG16 MODEL
+# ============================================================================
+base_model = VGG16(
+    input_shape=(IMG_SIZE, IMG_SIZE, 3),
+    include_top=False,
+    weights='imagenet'
+)
+base_model.trainable = False  # Freeze the convolutional base
+
+print("\nBase model loaded and frozen")
+
+# ============================================================================
+# 5. BUILD MODEL WITH CUSTOM CLASSIFIER
+# ============================================================================
+model = models.Sequential([
+    base_model,
+    layers.Flatten(),
+    layers.Dense(256, activation='relu'),
+    layers.Dropout(0.5),
+    layers.Dense(1, activation='sigmoid')  # Binary classification
+])
+
+print("\nModel architecture:")
+model.summary()
+
+# ============================================================================
+# 6. COMPILE AND TRAIN MODEL (FEATURE EXTRACTION)
+# ============================================================================
+model.compile(
+    optimizer='adam',
+    loss='binary_crossentropy',
+    metrics=['accuracy']
+)
+
+print("\n" + "="*60)
+print("PHASE 1: Training with frozen base model")
+print("="*60)
+
+history = model.fit(
+    train_generator,
+    validation_data=val_generator,
+    epochs=5,
+    verbose=1
+)
+
+# ============================================================================
+# 7. FINE-TUNING: UNFREEZE LAST LAYERS
+# ============================================================================
+print("\n" + "="*60)
+print("PHASE 2: Fine-tuning - unfreezing last 4 layers")
+print("="*60)
+
+# Unfreeze the base model
+base_model.trainable = True
+
+# Freeze all layers except the last 4
+for layer in base_model.layers[:-4]:
+    layer.trainable = False
+
+# Recompile with lower learning rate
+model.compile(
+    optimizer=optimizers.Adam(learning_rate=1e-5),  # Lower learning rate
+    loss='binary_crossentropy',
+    metrics=['accuracy']
+)
+
+# Continue training (fine-tuning)
+fine_tune_history = model.fit(
+    train_generator,
+    validation_data=val_generator,
+    epochs=5,
+    verbose=1
+)
+
+# ============================================================================
+# 8. PLOT TRAINING HISTORY
+# ============================================================================
+def plot_history(history, fine_tune_history):
+    """Plot training and validation accuracy/loss"""
+    acc = history.history['accuracy'] + fine_tune_history.history['accuracy']
+    val_acc = history.history['val_accuracy'] + fine_tune_history.history['val_accuracy']
+    loss = history.history['loss'] + fine_tune_history.history['loss']
+    val_loss = history.history['val_loss'] + fine_tune_history.history['val_loss']
+
+    epochs_range = range(len(acc))
+
+    plt.figure(figsize=(12, 4))
+    
+    # Accuracy plot
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs_range, acc, label='Train Accuracy')
+    plt.plot(epochs_range, val_acc, label='Val Accuracy')
+    plt.axvline(x=4.5, color='gray', linestyle='--', label='Fine-tuning start')
+    plt.legend()
+    plt.title('Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    
+    # Loss plot
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs_range, loss, label='Train Loss')
+    plt.plot(epochs_range, val_loss, label='Val Loss')
+    plt.axvline(x=4.5, color='gray', linestyle='--', label='Fine-tuning start')
+    plt.legend()
+    plt.title('Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    plt.tight_layout()
+    plt.show()
+
+plot_history(history, fine_tune_history)
+
+# ============================================================================
+# 9. EVALUATE MODEL
+# ============================================================================
+print("\n" + "="*60)
+print("FINAL EVALUATION")
+print("="*60)
+
+results = model.evaluate(val_generator)
+print(f"\nValidation Loss: {results[0]:.4f}")
+print(f"Validation Accuracy: {results[1]:.4f}")
+
+# ============================================================================
+# 10. SAVE MODEL
+# ============================================================================
+model.save('transfer_learning_model.h5')
+print("\nModel saved as 'transfer_learning_model.h5'")
+
+# ============================================================================
+# 11. MAKE PREDICTIONS ON NEW IMAGES
+# ============================================================================
+def predict_image(image_path):
+    """Predict class for a single image"""
+    from tensorflow.keras.preprocessing import image
+    import numpy as np
+    
+    img = image.load_img(image_path, target_size=(IMG_SIZE, IMG_SIZE))
+    img_array = image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0) / 255.0
+    
+    prediction = model.predict(img_array)[0][0]
+    class_names = list(train_generator.class_indices.keys())
+    
+    if prediction > 0.5:
+        predicted_class = class_names[1]
+        confidence = prediction
+    else:
+        predicted_class = class_names[0]
+        confidence = 1 - prediction
+    
+    print(f"Predicted: {predicted_class} (confidence: {confidence:.2%})")
+    
+    # Display image
+    plt.imshow(img)
+    plt.axis('off')
+    plt.title(f"Prediction: {predicted_class} ({confidence:.2%})")
+    plt.show()
+    
+    return predicted_class, confidence
+
+# Example usage (uncomment to test):
+# predict_image('path/to/test/image.jpg')
